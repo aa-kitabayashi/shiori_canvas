@@ -1,0 +1,10 @@
+[2026-09-14 09:54:06] [INFO] 処理対象: 1 件
+[2026-09-14 09:54:06] [ERROR] 処理失敗: C:\Users\jin82\OneDrive\デスクトップ\IT顧問\栗山自動車\KURIYAMA AI\automation\input\shiori_20260914_095218_862_c9fe9ffd.json SyntaxError: C:\Users\jin82\OneDrive\デスクトップ\IT顧問\栗山自動車\KURIYAMA AI\automation\input\shiori_20260914_095218_862_c9fe9ffd.json: Expected ',' or '}' after property value in JSON at position 229068 (line 8165 column 6)
+    at JSON.parse (<anonymous>)
+    at Object._readFile (C:\Users\jin82\OneDrive\デスクトップ\IT顧問\栗山自動車\KURIYAMA AI\automation\node_modules\jsonfile\index.js:25:16)
+    at async handleFile (C:\Users\jin82\OneDrive\デスクトップ\IT顧問\栗山自動車\KURIYAMA AI\automation\automation.js:273:15)
+    at async runBatch (C:\Users\jin82\OneDrive\デスクトップ\IT顧問\栗山自動車\KURIYAMA AI\automation\automation.js:119:19)
+    at async trigger (C:\Users\jin82\OneDrive\デスクトップ\IT顧問\栗山自動車\KURIYAMA AI\automation\automation.js:198:6)
+[2026-09-14 09:54:07] [INFO] 検知: shiori_20260914_095218_862_c9fe9ffd.json (2026/9/14 9:54:07)
+[2026-09-14 09:54:17] [ERROR] LINE WORKS 通知に失敗しました: fetch failed
+[2026-09-14 09:54:17] [INFO] バッチ処理完了

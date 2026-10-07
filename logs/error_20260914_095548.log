@@ -1,0 +1,13 @@
+[2026-09-14 09:55:58] [ERROR] 処理失敗: C:\Users\jin82\OneDrive\デスクトップ\IT顧問\栗山自動車\KURIYAMA AI\automation\input\shiori_20260914_095218_862_c9fe9ffd.json page.goto: net::ERR_ADDRESS_UNREACHABLE at https://stg.backend.kuriyama-truck.com/login
+Call log:
+[2m  - navigating to "https://stg.backend.kuriyama-truck.com/login", waiting until "load"[22m
+
+    at handleFile (C:\Users\jin82\OneDrive\デスクトップ\IT顧問\栗山自動車\KURIYAMA AI\automation\automation.js:295:14)
+    at async runBatch (C:\Users\jin82\OneDrive\デスクトップ\IT顧問\栗山自動車\KURIYAMA AI\automation\automation.js:119:19)
+    at async trigger (C:\Users\jin82\OneDrive\デスクトップ\IT顧問\栗山自動車\KURIYAMA AI\automation\automation.js:198:6) {
+  log: [
+    '  - navigating to "https://stg.backend.kuriyama-truck.com/login", waiting until "load"'
+  ],
+  name: 'Error',
+  stockNo: null
+}

@@ -1,0 +1,21 @@
+[2026-09-07 15:19:12] [INFO] 監視フォルダ: C:\Users\jin82\OneDrive\デスクトップ\IT顧問\栗山自動車\KURIYAMA AI\automation/input
+[2026-09-07 15:19:12] [INFO] === ファイル監視モード(--watch) ===
+[2026-09-07 15:19:12] [INFO] 処理対象: 1 件
+[2026-09-07 15:19:12] [INFO] テンプレート: 箱系 [②内外装シート/スペックシート(バン)]
+[2026-09-07 15:19:13] [INFO] 処理開始: C:\Users\jin82\OneDrive\デスクトップ\IT顧問\栗山自動車\KURIYAMA AI\automation\input\shiori_20260731_144204_016_e4de0379.json
+[2026-09-07 15:19:26] [ERROR] 処理失敗: C:\Users\jin82\OneDrive\デスクトップ\IT顧問\栗山自動車\KURIYAMA AI\automation\input\shiori_20260731_144204_016_e4de0379.json page.goto: net::ERR_NETWORK_CHANGED at https://stg.backend.kuriyama-truck.com/login
+Call log:
+[2m  - navigating to "https://stg.backend.kuriyama-truck.com/login", waiting until "load"[22m
+
+    at handleFile (C:\Users\jin82\OneDrive\デスクトップ\IT顧問\栗山自動車\KURIYAMA AI\automation\automation.js:289:14)
+    at async runBatch (C:\Users\jin82\OneDrive\デスクトップ\IT顧問\栗山自動車\KURIYAMA AI\automation\automation.js:119:19)
+    at async trigger (C:\Users\jin82\OneDrive\デスクトップ\IT顧問\栗山自動車\KURIYAMA AI\automation\automation.js:194:6)
+    at async watchLoop (C:\Users\jin82\OneDrive\デスクトップ\IT顧問\栗山自動車\KURIYAMA AI\automation\automation.js:206:2) {
+  log: [
+    '  - navigating to "https://stg.backend.kuriyama-truck.com/login", waiting until "load"'
+  ],
+  name: 'Error'
+}
+[2026-09-07 15:19:26] [INFO] バッチ処理完了
+[2026-09-07 15:19:27] [INFO] ファイル監視中... (Ctrl+C で終了)
+[2026-09-07 15:20:07] [INFO] 検知: shiori_20260731_144204_016_e4de0379.json (2026/9/7 15:20:07)

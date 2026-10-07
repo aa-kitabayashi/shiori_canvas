@@ -1,0 +1,19 @@
+[2026-09-14 09:54:17] [INFO] 処理対象: 1 件
+[2026-09-14 09:54:17] [INFO] テンプレート: ダンプ [②内外装シート/スペックシート(ダンプ)]
+[2026-09-14 09:54:17] [INFO] 処理開始: C:\Users\jin82\OneDrive\デスクトップ\IT顧問\栗山自動車\KURIYAMA AI\automation\input\shiori_20260914_095218_862_c9fe9ffd.json
+[2026-09-14 09:54:20] [ERROR] 処理失敗: C:\Users\jin82\OneDrive\デスクトップ\IT顧問\栗山自動車\KURIYAMA AI\automation\input\shiori_20260914_095218_862_c9fe9ffd.json page.goto: net::ERR_ABORTED; maybe frame was detached?
+Call log:
+[2m  - navigating to "https://stg.backend.kuriyama-truck.com/login", waiting until "load"[22m
+
+    at handleFile (C:\Users\jin82\OneDrive\デスクトップ\IT顧問\栗山自動車\KURIYAMA AI\automation\automation.js:295:14)
+    at async runBatch (C:\Users\jin82\OneDrive\デスクトップ\IT顧問\栗山自動車\KURIYAMA AI\automation\automation.js:119:19)
+    at async trigger (C:\Users\jin82\OneDrive\デスクトップ\IT顧問\栗山自動車\KURIYAMA AI\automation\automation.js:198:6) {
+  log: [
+    '  - navigating to "https://stg.backend.kuriyama-truck.com/login", waiting until "load"'
+  ],
+  name: 'Error',
+  stockNo: null
+}
+[2026-09-14 09:54:31] [ERROR] LINE WORKS 通知に失敗しました: fetch failed
+[2026-09-14 09:54:31] [INFO] バッチ処理完了
+[2026-09-14 09:55:41] [INFO] 検知: shiori_20260914_095218_862_c9fe9ffd.json (2026/9/14 9:55:41)

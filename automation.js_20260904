@@ -1,0 +1,554 @@
+const fs = require('fs-extra');
+const path = require('path');
+const { chromium } = require('playwright');
+const ini = require('ini');
+
+//
+// 設定ファイル(config.ini)を読み込む
+//
+const CONFIG_PATH = path.join(__dirname, 'config.ini');
+if (!fs.existsSync(CONFIG_PATH)) {
+	console.error(`設定ファイルが見つかりません: ${CONFIG_PATH}`);
+	console.error('config.ini.example をコピーして config.ini を作成してください。');
+	process.exit(1);
+}
+const config = ini.parse(fs.readFileSync(CONFIG_PATH, 'utf-8'));
+
+// 監視フォルダ
+const WATCH_DIR = __dirname + "/input";
+
+// 処理済み移動先
+const PROCESSED_DIR = __dirname + "/processed";
+
+// 実行時刻(config.ini の [schedule] run_time。未設定なら 02:00)
+const RUN_TIME = (config.schedule && config.schedule.run_time) || '02:00';
+
+
+//
+// input フォルダ内の全 JSON をまとめて処理する(1回分)
+//
+async function runBatch() {
+	await fs.ensureDir(WATCH_DIR);
+	const entries = await fs.readdir(WATCH_DIR);
+	const files = entries
+		.filter((f) => path.extname(f).toLowerCase() === '.json')
+		.sort((a, b) => a.localeCompare(b, undefined, { numeric: true })) // ファイル名の昇順(古い順)
+		.map((f) => path.join(WATCH_DIR, f));
+
+	if (files.length === 0) {
+		console.log('処理対象の JSON はありません');
+		return;
+	}
+
+	console.log(`処理対象: ${files.length} 件`);
+	for (const filePath of files) {
+		//console.log(`検知: ${filePath}`);
+		try {
+			await handleFile(filePath); // 1件ずつ順番に処理(handleFile内で処理済みへ移動)
+		} catch (err) {
+			console.error(`処理失敗: ${filePath}`, err);
+		}
+	}
+	console.log('バッチ処理完了');
+}
+
+
+//
+// 次回 run_time までのミリ秒を計算
+//
+function msUntilNext(timeStr) {
+	const [h, m] = timeStr.split(':').map(Number);
+	const now = new Date();
+	const next = new Date(now.getFullYear(), now.getMonth(), now.getDate(), h, m, 0, 0);
+	if (next <= now) next.setDate(next.getDate() + 1); // 今日の時刻を過ぎていれば翌日
+	return next - now;
+}
+
+
+//
+// 毎日 run_time に1回だけ runBatch を実行し続ける(プロセス常駐)
+//
+async function scheduleLoop() {
+	while (true) {
+		const wait = msUntilNext(RUN_TIME);
+		const next = new Date(Date.now() + wait);
+		console.log(`次回実行予定: ${next.toLocaleString()} (約 ${Math.round(wait / 60000)} 分後)`);
+		await new Promise((resolve) => setTimeout(resolve, wait));
+
+		console.log(`=== バッチ開始: ${new Date().toLocaleString()} ===`);
+		await runBatch();
+	}
+}
+
+
+//
+// 処理
+//
+async function handleFile(filePath) {
+	const data = await fs.readJson(filePath);
+	//console.log('読み込んだデータ:', data);
+
+	// ステータス確認
+	if (data.payload.shioriStatus != "完了") {
+		console.log(`ステータス異常: ${filePath}`);
+		return;
+	}
+	const browser = await chromium.launch({ headless: false, slowMo: 100 });
+	const page = await browser.newPage();
+
+	console.log(`処理開始: ${filePath}`);
+
+	try {
+		// ログイン
+		await page.goto(config.site.base_url + "/login");
+		await safeFill(page,"input[name=name]" , config.login.id);
+		await safeFill(page,"input[name=pass]" , config.login.password);
+		await page.click("#login_submit");
+
+		//await page.waitForTimeout(1000);
+
+		// サイト（書類）編集画面
+		var result = getShioriValue(data, 'ストックNo.');
+		if (result == "") {
+			console.log(`ストックNO無し: ${filePath}`);
+			return;
+		}
+		const stock_no = result.split("-")[1]; 
+		await page.goto(config.site.base_url + "/stock_regist/detail/" + stock_no);
+		await page.waitForTimeout(1000);
+
+		//
+		var t_vehicle__shape_cls_id = 0;
+		const isWing = getShioriValue(data, '形状ｰウイング');
+		if (isWing) t_vehicle__shape_cls_id = 1;
+		const isVan = getShioriValue(data, '形状ｰバン');
+		if (isVan) t_vehicle__shape_cls_id = 2;
+		const isTrailer = getShioriValue(data, '形状ｰトレーラー');
+		if (isTrailer) t_vehicle__shape_cls_id = 12;
+		const isRVan = getShioriValue(data, '形状ｰ冷凍バン');
+		if (isRVan) t_vehicle__shape_cls_id = 3;
+		const isRWing = getShioriValue(data, '形状ｰ冷凍ウイング');
+		if (isRWing) t_vehicle__shape_cls_id = 13;
+		// ⑩形状
+		await page.selectOption('select[name="t_vehicle__shape_cls_id"]' , { value: String(t_vehicle__shape_cls_id) });
+
+		// ①走行距離
+		const t_vehicle__mileage = toHalfWidthNumber(getShioriValue(data, '基本情報ｰ走行距離'));
+		await safeFill(page,'input[name="t_vehicle__mileage"]' , t_vehicle__mileage);
+
+		// ②エンジン型式
+		const t_vehicle__engine_model = getShioriValue(data, '基本情報-エンジン型式');
+		await safeFill(page,'input[name="t_vehicle__engine_model"]' , t_vehicle__engine_model);
+
+		// ③馬力
+		const t_vehicle__horse_power = toHalfWidthNumber(getShioriValue(data, '基本情報-馬力'));
+		await safeFill(page,'input[name="t_vehicle__horse_power"]' , t_vehicle__horse_power);
+
+		// ④シフト TODO
+		//・ミッション形式　マニュアルの場合
+		//　その数字+MTのもの
+		//・ミッション形式　セミATの場合
+		//　　メーカーがいすゞ　→　スムーサー+クラッチペダル数
+		//　　メーカーが日野　→　プロシフト+クラッチペダル数
+		//　　メーカーが三菱ふそう　→　イノマット+クラッチペダル数
+		//　　メーカーがUD　→　エスコット++クラッチペダル数
+		//・ミッション形式　オートマの場合
+		//　→オートマ
+		// ④ミッション-ミッション段数
+		const transmission_gears = toHalfWidthNumber(getShioriValue(data, 'ミッション-ミッション段数'));
+
+		const isTransmission_manual = getShioriValue(data, 'ミッション-ミッション方式-マニュアル');
+		const isTransmission_semiAT = getShioriValue(data, 'ミッション-ミッション方式-セミAT');
+		const isTransmission_automa = getShioriValue(data, 'ミッション-ミッション方式-オートマ');
+		if (isTransmission_manual) {
+			// マニュアル
+			var selected = transmission_gears + "MT";
+			try {
+				await page.selectOption(
+					'select[name="t_vehicle__shift_cls_id"]',
+					{ label: selected },
+					{ timeout: 1000 }
+				);
+			} catch (e) {}
+		}
+		// オートマ
+		if (isTransmission_automa) {
+			try {
+				await page.selectOption(
+					'select[name="t_vehicle__shift_cls_id"]',
+					{ label: "オートマ" },
+					{ timeout: 1000 }
+				);
+			} catch (e) {}
+		}
+		// セミAT
+		if (isTransmission_semiAT) {
+
+			const t_vehicle__manufacturer_id = await page.locator(
+			'select[name="t_vehicle__manufacturer_id"] option:checked'
+			).textContent();
+			const clutch_pedal_count = toHalfWidthNumber(getShioriValue(data, 'ミッション-クラッチペダル数'));
+
+			var selected = "";
+			if (t_vehicle__manufacturer_id == "いすず" ) {
+				selected = "スムーサー(" + clutch_pedal_count + "ペダル)";
+			}
+			if (t_vehicle__manufacturer_id == "日野" ) {
+				selected = "プロシフト(" + clutch_pedal_count + "ペダル)";
+			}
+			if (t_vehicle__manufacturer_id == "三菱ふそう" ) {
+				selected = "イノマット(" + clutch_pedal_count + "ペダル)";
+			}
+			if (t_vehicle__manufacturer_id == "日産UD" ) {
+				selected = "エスコット(" + clutch_pedal_count + "ペダル)";
+			}
+			try {
+				await page.selectOption(
+					'select[name="t_vehicle__shift_cls_id"]',
+					{ label: selected },
+					{ timeout: 1000 }
+				);
+			} catch (e) {}
+		}
+
+		// ⑤サスペンション
+		var t_vehicle__suspension_cls_id = 0;
+		const isLeaf = getShioriValue(data, '駆動他　サスペンション-リーフ');
+		if (isLeaf) t_vehicle__suspension_cls_id = 1;
+		const isBAir = getShioriValue(data, '駆動他　サスペンション-後輪エア');
+		if (isBAir) t_vehicle__suspension_cls_id = 2;
+		const isAir = getShioriValue(data, '駆動他　サスペンション-総輪エア');
+		if (isAir) t_vehicle__suspension_cls_id = 3;
+		const isF = getShioriValue(data, '駆動他　サスペンション-F独立');
+		if (isF) t_vehicle__suspension_cls_id = 4;
+		await page.selectOption('select[name="t_vehicle__suspension_cls_id"]' , { value: String(t_vehicle__suspension_cls_id) });
+
+		// ⑥ボディーメーカー
+		const t_vehicle__body_manufacturer_id = getShioriValue(data, 'ボディ　ボディーメーカー');
+		try {
+			await page.selectOption(
+				'select[name="t_vehicle__body_manufacturer_id"]',
+				{ label: t_vehicle__body_manufacturer_id },
+				{ timeout: 1000 }
+			);
+		} catch (e) {
+			await page.selectOption('select[name="t_vehicle__body_manufacturer_id"]' , { label: "その他" });
+		}
+
+		// ⑥ボディ型式
+		const t_vehicle__body_model = getShioriValue(data, 'ボディ　ボディ型式');
+		await safeFill(page,'input[name="t_vehicle__body_model"]' , t_vehicle__body_model);
+
+		// ⑥床材
+		// ⑥床
+		var floor_material = 0;
+		const isFloor_material_ki = getShioriValue(data, '庫内装備　床材-木');
+		if (isFloor_material_ki) floor_material = 1;
+		const isFloor_material_tetsu = getShioriValue(data, '庫内装備　床材-鉄');
+		if (isFloor_material_tetsu) floor_material = 2;
+		const isFloor_material_center = getShioriValue(data, '庫内装備　床-センターローラー');
+		if (isFloor_material_center) floor_material = 3;
+		const isFloor_material_aluminum = getShioriValue(data, '庫内装備　床材-アルミ');
+		if (isFloor_material_aluminum) floor_material = 4;
+		const isFloor_material_key = getShioriValue(data, '庫内装備　床-キーストン');
+		if (isFloor_material_key) floor_material = 5;
+		const isFloor_material_stainless = getShioriValue(data, '庫内装備　床材-ステン');
+		if (isFloor_material_stainless) floor_material = 6;
+		await page.selectOption('select[name="t_vehicle__floor_cls_id"]' , { value: String(floor_material) });
+
+		// ⑥ラッシング
+		const t_vehicle__lashing = getShioriValue(data, '庫内装備　ラッシング');
+		await safeFill(page,'input[name="t_vehicle__lashing"]' , t_vehicle__lashing);
+
+		// ⑥フック
+		const t_vehicle__inner_hook = getShioriValue(data, '庫内装備　内フック（左右）');
+		await safeFill(page,'input[name="t_vehicle__inner_hook"]' , t_vehicle__inner_hook);
+
+		// ⑦長さ
+		const t_vehicle__length = toHalfWidthNumber(getShioriValue(data, '内寸　長さ'));
+		await safeFill(page,'input[name="t_vehicle__length"]' , t_vehicle__length);
+
+		// ⑦幅
+		const t_vehicle__width = toHalfWidthNumber(getShioriValue(data, '内寸　幅'));
+		await safeFill(page,'input[name="t_vehicle__width"]' , t_vehicle__width);
+
+		// ⑦高さ
+		const t_vehicle__height = toHalfWidthNumber(getShioriValue(data, '内寸　高さ'));
+		await safeFill(page,'input[name="t_vehicle__height"]' , t_vehicle__height);
+
+		// ⑦門口幅
+		const t_vehicle__door_width = toHalfWidthNumber(getShioriValue(data, '門口　幅'));
+		await safeFill(page,'input[name="t_vehicle__door_width"]' , t_vehicle__door_width);
+
+		// ⑦門口高さ
+		const t_vehicle__door_height = toHalfWidthNumber(getShioriValue(data, '門口　高さ'));
+		await safeFill(page,'input[name="t_vehicle__door_height"]' , t_vehicle__door_height);
+
+		// ⑧メーカー
+		const t_vehicle__gate_manufacturer_id = getShioriValue(data, 'パワーゲート　メーカー');
+		//console.log(t_vehicle__body_manufacturer_id);
+		try {
+			await page.selectOption(
+				'select[name="t_vehicle__gate_manufacturer_id"]',
+				{ label: t_vehicle__gate_manufacturer_id },
+				{ timeout: 1000 }
+			);
+		} catch (e) {
+			//console.log("その他");
+			await page.selectOption('select[name="t_vehicle__gate_manufacturer_id"]' , { label: "その他" });
+		}
+
+		// ⑧メーカー　ゲートタイプ TODO
+		// パワーゲート　ゲートタイプ-跳上
+		var t_vehicle__power_gate_cls_id = 0;
+		const isGate_type_lift = getShioriValue(data, 'パワーゲート　ゲートタイプ-跳上');
+		const isGate_type_stow = getShioriValue(data, 'パワーゲート　ゲートタイプ-格納');
+		const isGate_type_vert = getShioriValue(data, 'パワーゲート　ゲートタイプ-垂直');
+		if (isGate_type_lift) t_vehicle__power_gate_cls_id = 3;
+		if (isGate_type_stow) t_vehicle__power_gate_cls_id = 4;
+		if (isGate_type_vert) t_vehicle__power_gate_cls_id = 5;
+		await page.selectOption('select[name="t_vehicle__power_gate_cls_id"]' , { value: String(t_vehicle__power_gate_cls_id) });
+
+
+		// ⑧昇降能力
+		const t_vehicle__gate_updown_power = getShioriValue(data, 'パワーゲート　昇降能力');
+		await safeFill(page,'input[name="t_vehicle__gate_updown_power"]' , t_vehicle__gate_updown_power);
+
+		// ⑧開閉
+		var t_vehicle__open_and_close_cls_id = 0;
+		const isVehicle__open_and_close_auto = getShioriValue(data, 'パワーゲート　開閉-オート');
+		if (isVehicle__open_and_close_auto) t_vehicle__open_and_close_cls_id = 1;
+		const isVehicle__open_and_close_balance = getShioriValue(data, 'パワーゲート　開閉-バランス');
+		if (isVehicle__open_and_close_balance) t_vehicle__open_and_close_cls_id = 2;
+		await page.selectOption('select[name="t_vehicle__open_and_close_cls_id"]' , { value: String(t_vehicle__open_and_close_cls_id) });
+
+		// ⑧（寸法）　奥行き
+		const t_vehicle__measure_depth = toHalfWidthNumber(getShioriValue(data, '（寸法）　奥行き'));
+		await safeFill(page,'input[name="t_vehicle__measure_depth"]' , t_vehicle__measure_depth);
+
+		// ⑧（寸法）　幅
+		const t_vehicle__measure_width = toHalfWidthNumber(getShioriValue(data, '（寸法）　幅'));
+		await safeFill(page,'input[name="t_vehicle__measure_width"]' , t_vehicle__measure_width);
+
+		// ⑧ストッパー
+		var t_vehicle__stopper_cls_id = 0;
+		const isVehicle__stopper_ari = getShioriValue(data, '（寸法）　ストッパー分割-有');
+		if (isVehicle__stopper_ari) t_vehicle__stopper_cls_id = 2;
+		const isVehicle__stopper_nai = getShioriValue(data, '（寸法）　ストッパー分割-無');
+		if (isVehicle__stopper_nai) t_vehicle__stopper_cls_id = 1;
+		await page.selectOption('select[name="t_vehicle__stopper_cls_id"]' , { value: String(t_vehicle__stopper_cls_id) });
+
+		// ⑧（寸法）　ストッパーまで奥行き
+		const t_vehicle__depth_to_stopper = toHalfWidthNumber(getShioriValue(data, '（寸法）　ストッパーまで奥行き'));
+		await safeFill(page,'input[name="t_vehicle__depth_to_stopper"]' , t_vehicle__depth_to_stopper);
+
+		// ⑧（寸法）　ストッパーまで奥行き
+		const t_vehicle__width_to_stopper = toHalfWidthNumber(getShioriValue(data, '（寸法）　ストッパーまで幅'));
+		await safeFill(page,'input[name="t_vehicle__width_to_stopper"]' , t_vehicle__width_to_stopper);
+
+		// ⑨冷凍機メーカー
+		const t_vehicle__freezing_machine_manufacturer_id = getShioriValue(data, '冷凍機　冷凍機メーカー');
+		try {
+			await page.selectOption(
+				'select[name="t_vehicle__freezing_machine_manufacturer_id"]',
+				{ label: t_vehicle__freezing_machine_manufacturer_id },
+				{ timeout: 1000 }
+			);
+		} catch (e) {
+			//console.log("その他");
+			await page.selectOption('select[name="t_vehicle__freezing_machine_manufacturer_id"]' , { label: "その他" });
+		}
+
+		// ⑨冷凍機　冷凍機型式
+		const t_vehicle__freezing_machine_model = getShioriValue(data, '冷凍機　冷凍機型式');
+		await safeFill(page,'input[name="t_vehicle__freezing_machine_model"]' , t_vehicle__freezing_machine_model);
+
+		// ⑨冷凍機　スタンバイ
+		var t_vehicle__freezing_machine_standby_cls_id = 0;
+		const isVehicle__freezing_machine_standby_ari = getShioriValue(data, '冷凍機　スタンバイ-有');
+		const isVehicle__freezing_machine_standby_nai = getShioriValue(data, '冷凍機　スタンバイ-無');
+		const isVehicle__freezing_machine_code_ari = getShioriValue(data, '冷凍機　（コード）-有');
+		const isVehicle__freezing_machine_code_nai = getShioriValue(data, '冷凍機　（コード）-無');
+		if (isVehicle__freezing_machine_standby_nai) {
+			t_vehicle__freezing_machine_standby_cls_id = 1;
+		} else if (isVehicle__freezing_machine_standby_ari) {
+			if (isVehicle__freezing_machine_code_ari) {
+				t_vehicle__freezing_machine_standby_cls_id = 2;
+			} else if (isVehicle__freezing_machine_code_nai) {
+				t_vehicle__freezing_machine_standby_cls_id = 3;
+			}
+		}
+		await page.selectOption('select[name="t_vehicle__freezing_machine_standby_cls_id"]' , { value: String(t_vehicle__freezing_machine_standby_cls_id) });
+
+		// ⑨冷凍機　温度設定-下限①
+		const t_vehicle__freezing_preset_temperature = toHalfWidthNumber(getShioriValue(data, '冷凍機　温度設定-下限'));
+		await safeFill(page,'input[name="t_vehicle__freezing_preset_temperature"]' , t_vehicle__freezing_preset_temperature);
+
+		// ⑨冷凍機　温度計測-自②
+		const t_vehicle__freezing_before_operate_temperature = toHalfWidthNumber(getShioriValue(data, '冷凍機　温度計測-自'));
+		await safeFill(page,'input[name="t_vehicle__freezing_before_operate_temperature"]' , t_vehicle__freezing_before_operate_temperature);
+
+		// ⑨冷凍機　温度計測-時間③
+		const t_vehicle__freezing_measurement_time = toHalfWidthNumber(getShioriValue(data, '冷凍機　温度計測-時間'));
+		await safeFill(page,'input[name="t_vehicle__freezing_measurement_time"]' , t_vehicle__freezing_measurement_time);
+
+		// ⑨冷凍機　温度計測-至④
+		const t_vehicle__freezing_measurement_temprature = toHalfWidthNumber(getShioriValue(data, '冷凍機　温度計測-至'));
+		await safeFill(page,'input[name="t_vehicle__freezing_measurement_temprature"]' , t_vehicle__freezing_measurement_temprature);
+
+		// ⑪ホイール
+		const isWheel_fe = getShioriValue(data, '駆動他　ホイール-鉄');
+		const isWheel_chrome = getShioriValue(data, '駆動他　ホイール-スチールメッキ');
+		const isWheel_aluminum = getShioriValue(data, '駆動他　ホイール-アルミ');
+		if (isWheel_fe || isWheel_chrome || isWheel_aluminum) {
+			try {
+				await page.selectOption(
+					'select[name="t_vehicle__alloy_wheels_cls_id"]',
+					{ label: "有" },
+					{ timeout: 1000 }
+				);
+			} catch (e) {}
+		} else {
+			try {
+				await page.selectOption(
+					'select[name="t_vehicle__alloy_wheels_cls_id"]',
+					{ label: "無" },
+					{ timeout: 1000 }
+				);
+			} catch (e) {}
+		}
+		// ⑪駆動他　燃料タンク１
+		const t_vehicle__fuel_tank = toHalfWidthNumber(getShioriValue(data, '駆動他　燃料タンク１'));
+		await safeFill(page,'input[name="t_vehicle__fuel_tank"]' , t_vehicle__fuel_tank);
+
+		const t_vehicle__fuel_tank_capacity = toHalfWidthNumber(getShioriValue(data, '駆動他　燃料タンク２'));
+		await safeFill(page,'input[name="t_vehicle__fuel_tank_capacity"]' , t_vehicle__fuel_tank_capacity);
+	
+		// ⑪装備　ヘッドランプ
+		var t_vehicle__discharge_light_cls_id = 0;
+		const isHeadlamp_halogen = getShioriValue(data, '装備　ヘッドランプ-ハロゲン');
+		const isHeadlamp_hid = getShioriValue(data, '装備　ヘッドランプ-ディスチャ');
+		const isHeadlamp_led = getShioriValue(data, '装備　ヘッドランプ-LED');
+		if (isHeadlamp_halogen) t_vehicle__discharge_light_cls_id = 1;
+		if (isHeadlamp_hid) t_vehicle__discharge_light_cls_id = 2;
+		if (isHeadlamp_led) t_vehicle__discharge_light_cls_id = 3;
+		await page.selectOption('select[name="t_vehicle__discharge_light_cls_id"]' , { value: String(t_vehicle__discharge_light_cls_id) });
+		
+		// ⑪電装品　バックアイ
+		var t_vehicle__back_eye_cls_id = 0;
+		const isRear_view_camera_nai = getShioriValue(data, '電装品　バックアイ-無');
+		const isRear_view_camera_ari = getShioriValue(data, '電装品　バックアイ-有');
+		if (isRear_view_camera_nai) t_vehicle__back_eye_cls_id = 1;
+		if (isRear_view_camera_ari) t_vehicle__back_eye_cls_id = 2;
+		await page.selectOption('select[name="t_vehicle__back_eye_cls_id"]' , { value: String(t_vehicle__back_eye_cls_id) });
+		
+		// ⑪電装品　ETC-有(2.0)
+		var t_vehicle__etc_cls_id = 0;
+		const isEtc_ari2 = getShioriValue(data, '電装品　ETC-有(2.0)');
+		const isEtc_ari1 = getShioriValue(data, '電装品　ETC-有(1.0)');
+		const isEtc_nai = getShioriValue(data, '電装品　ETC-無');
+		if (isEtc_ari2) t_vehicle__etc_cls_id = 1;
+		if (isEtc_ari1) t_vehicle__etc_cls_id = 1;
+		if (isEtc_nai) t_vehicle__etc_cls_id = 2;
+		await page.selectOption('select[name="t_vehicle__etc_cls_id"]' , { value: String(t_vehicle__etc_cls_id) });
+
+
+
+		// 登録ボタンを押す「前」にダイアログの処理を仕込む
+		page.once('dialog', async (dialog) => {
+			console.log('ダイアログ:', dialog.message());
+			await dialog.accept();  // OK を押す
+		});
+		
+		// 保存（更新）
+		await page.click('#submit_button');
+		// 同じ画面が出てくるまで待機
+		
+		//await page.waitForTimeout(3000); // 3秒：登録完了待ち
+		
+		console.log(`処理完了: ${filePath}`);
+		
+	} finally {
+		await browser.close();
+	}
+
+	// 処理済みフォルダへ移動(同じファイル名で再検知しないように)
+	await fs.ensureDir(PROCESSED_DIR);
+	const destPath = path.join(PROCESSED_DIR, path.basename(filePath));
+	await fs.move(filePath, destPath, { overwrite: true });
+}
+
+
+
+/**
+ * page.fill は文字列必須。number/null/false/'' が来ても落ちないようにするラッパー。
+ * 値が空(null/undefined/false)ならスキップする。
+ */
+async function safeFill(page, selector, value) {
+	if (value === null || value === undefined || value === false) return;
+	await page.fill(selector, String(value));
+}
+
+
+/**
+ * name で値を取得（該当なしは null）
+ * @param {Object} data Webhook JSON全体
+ * @param {string} name 項目名
+ * // 使用例
+ * const isWing = getShioriValue(data, '形状ｰウイング');   // → false
+ */
+function getShioriValue(data, name) {
+  const pages = (data.payload && data.payload.pages) || [];
+  for (let i = 0; i < pages.length; i++) {
+    const list = pages[i].metafields || [];
+    for (let j = 0; j < list.length; j++) {
+      if (list[j].name === name) {
+        const v = list[j].values || {};
+        if (list[j].type === 'checkbox') return v.value === true;
+        if (list[j].type === 'pulldown1') return (v.select && v.select.label) || '';
+        return v.value != null ? v.value : '';
+      }
+    }
+  }
+  return null;
+}
+
+
+/**
+ * 文字列から数字だけを取り出す（全角数字は半角に変換）
+ * 例: "３t"     → "3"
+ *     "１,２００kg" → "1200"
+ *     "約 50 km" → "50"
+ * @param {*} value 変換元（数値・null等が来ても落ちない）
+ * @returns {string} 数字のみの文字列（該当なしは ''）
+ */
+function toHalfWidthNumber(value) {
+	if (value == null) return '';
+	return String(value)
+		.replace(/[０-９]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xFEE0)) // 全角数字→半角
+		.replace(/[^0-9]/g, ''); // 数字以外を除去
+}
+
+//
+// 起動
+//
+console.log(`監視フォルダ: ${WATCH_DIR}`);
+
+// デバッグ用: 「node automation.js --now」で即時1回だけ実行して終了
+const RUN_NOW = process.argv.includes('--now') || process.argv.includes('-n');
+
+if (RUN_NOW) {
+	console.log('=== 即時実行モード(--now) ===');
+	runBatch()
+		.then(() => {
+			console.log('完了して終了します');
+			process.exit(0);
+		})
+		.catch((err) => {
+			console.error('エラーで終了します', err);
+			process.exit(1);
+		});
+} else {
+	console.log(`毎日 ${RUN_TIME} に処理を実行します`);
+	scheduleLoop();
+}

@@ -1,0 +1,13 @@
+[2026-09-07 15:19:26] [ERROR] 処理失敗: C:\Users\jin82\OneDrive\デスクトップ\IT顧問\栗山自動車\KURIYAMA AI\automation\input\shiori_20260731_144204_016_e4de0379.json page.goto: net::ERR_NETWORK_CHANGED at https://stg.backend.kuriyama-truck.com/login
+Call log:
+[2m  - navigating to "https://stg.backend.kuriyama-truck.com/login", waiting until "load"[22m
+
+    at handleFile (C:\Users\jin82\OneDrive\デスクトップ\IT顧問\栗山自動車\KURIYAMA AI\automation\automation.js:289:14)
+    at async runBatch (C:\Users\jin82\OneDrive\デスクトップ\IT顧問\栗山自動車\KURIYAMA AI\automation\automation.js:119:19)
+    at async trigger (C:\Users\jin82\OneDrive\デスクトップ\IT顧問\栗山自動車\KURIYAMA AI\automation\automation.js:194:6)
+    at async watchLoop (C:\Users\jin82\OneDrive\デスクトップ\IT顧問\栗山自動車\KURIYAMA AI\automation\automation.js:206:2) {
+  log: [
+    '  - navigating to "https://stg.backend.kuriyama-truck.com/login", waiting until "load"'
+  ],
+  name: 'Error'
+}

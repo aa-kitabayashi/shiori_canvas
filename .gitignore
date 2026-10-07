@@ -1,0 +1,5 @@
+# INI設定ファイル
+*.ini
+
+# 秘密鍵
+private_key.pem

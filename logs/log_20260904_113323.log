@@ -1,0 +1,10 @@
+[2026-09-04 11:33:23] [INFO] 監視フォルダ: C:\Users\jin82\OneDrive\デスクトップ\IT顧問\栗山自動車\KURIYAMA AI\automation/input
+[2026-09-04 11:33:23] [INFO] === ファイル監視モード(--watch) ===
+[2026-09-04 11:33:23] [INFO] 処理対象: 1 件
+[2026-09-04 11:33:23] [INFO] テンプレート: 箱系 [②内外装シート/スペックシート(バン)]
+[2026-09-04 11:33:24] [INFO] 処理開始: C:\Users\jin82\OneDrive\デスクトップ\IT顧問\栗山自動車\KURIYAMA AI\automation\input\shiori_20260904_103052_578_55c71ae8.json
+[2026-09-04 11:33:29] [INFO] ダイアログ: この内容で登録します
+[2026-09-04 11:33:33] [INFO] 処理完了: C:\Users\jin82\OneDrive\デスクトップ\IT顧問\栗山自動車\KURIYAMA AI\automation\input\shiori_20260904_103052_578_55c71ae8.json
+[2026-09-04 11:33:33] [INFO] バッチ処理完了
+[2026-09-04 11:33:33] [INFO] LINE WORKS 未設定のため通知をスキップします
+[2026-09-04 11:33:33] [INFO] ファイル監視中... (Ctrl+C で終了)

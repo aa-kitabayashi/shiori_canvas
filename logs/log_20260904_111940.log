@@ -1,0 +1,44 @@
+[2026-09-04 11:19:40] [INFO] 処理対象: 1 件
+[2026-09-04 11:19:41] [INFO] 処理開始: C:\Users\jin82\OneDrive\デスクトップ\IT顧問\栗山自動車\KURIYAMA AI\automation\input\shiori_20260904_103052_578_55c71ae8.json
+[2026-09-04 11:20:18] [ERROR] 処理失敗: C:\Users\jin82\OneDrive\デスクトップ\IT顧問\栗山自動車\KURIYAMA AI\automation\input\shiori_20260904_103052_578_55c71ae8.json page.selectOption: Timeout 30000ms exceeded.
+Call log:
+[2m  - waiting for locator('select[name="t_vehicle__body_manufacturer_id"]')[22m
+[2m    - locator resolved to <select class="w_23" name="t_vehicle__body_manufacturer_id">…</select>[22m
+[2m  - attempting select option action[22m
+[2m    2 × waiting for element to be visible and enabled[22m
+[2m      - element is not visible[22m
+[2m    - retrying select option action[22m
+[2m    - waiting 20ms[22m
+[2m    2 × waiting for element to be visible and enabled[22m
+[2m      - element is not visible[22m
+[2m    - retrying select option action[22m
+[2m      - waiting 100ms[22m
+[2m    58 × waiting for element to be visible and enabled[22m
+[2m       - element is not visible[22m
+[2m     - retrying select option action[22m
+[2m       - waiting 500ms[22m
+
+    at handleFile (C:\Users\jin82\OneDrive\デスクトップ\IT顧問\栗山自動車\KURIYAMA AI\automation\automation.js:364:15)
+    at async runBatch (C:\Users\jin82\OneDrive\デスクトップ\IT顧問\栗山自動車\KURIYAMA AI\automation\automation.js:110:19)
+    at async trigger (C:\Users\jin82\OneDrive\デスクトップ\IT顧問\栗山自動車\KURIYAMA AI\automation\automation.js:185:6) {
+  log: [
+    `  - waiting for locator('select[name="t_vehicle__body_manufacturer_id"]')`,
+    '    - locator resolved to <select class="w_23" name="t_vehicle__body_manufacturer_id">…</select>',
+    '  - attempting select option action',
+    '    2 × waiting for element to be visible and enabled',
+    '      - element is not visible',
+    '    - retrying select option action',
+    '    - waiting 20ms',
+    '    2 × waiting for element to be visible and enabled',
+    '      - element is not visible',
+    '    - retrying select option action',
+    '      - waiting 100ms',
+    '    58 × waiting for element to be visible and enabled',
+    '       - element is not visible',
+    '     - retrying select option action',
+    '       - waiting 500ms'
+  ],
+  name: 'TimeoutError'
+}
+[2026-09-04 11:20:18] [INFO] バッチ処理完了
+[2026-09-04 11:20:18] [INFO] LINE WORKS 未設定のため通知をスキップします
