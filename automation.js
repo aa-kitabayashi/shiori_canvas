@@ -83,6 +83,37 @@ console.error = (...args) => { origError(...args); appendLog('ERROR', args); };
 
 
 //
+// 処理中のファイル1件分の状況(エラー通知に「どこで失敗したか」を載せるため)
+// バッチは1件ずつ順番に処理するのでモジュール変数で持つ
+//   step      : 現在の処理工程(ログイン/編集画面を開く/フォーム入力/保存 など)
+//   lastName  : 直近に読んだしおり項目名(エラー箇所の目安)
+//   warnings  : 画面に入力できずスキップした項目(処理は続行したもの)
+//   shioriNo  : しおりNo(S12813 など)
+//
+let ctx = { step: '', lastName: '', warnings: [], shioriNo: '' };
+
+function resetCtx() {
+	ctx = { step: '', lastName: '', warnings: [], shioriNo: '' };
+}
+
+// 入力できずスキップした項目を記録する(同じ内容は1回だけ)
+function addWarning(selector, value) {
+	const field = ctx.lastName ? `「${ctx.lastName}」` : '';
+	const text = `${field}${selector.replace(/^.*name="?([^"\]]+)"?\]?$/, '$1')} = ${String(value).slice(0, 30)}`;
+	if (!ctx.warnings.includes(text)) ctx.warnings.push(text);
+}
+
+// 通知用: 入力できなかった項目の一覧テキスト(無ければ空文字)
+function warningsText(warnings) {
+	if (!warnings || warnings.length === 0) return '';
+	const max = 10;
+	const lines = warnings.slice(0, max).map((w) => `・${w}`);
+	if (warnings.length > max) lines.push(`…ほか ${warnings.length - max} 件`);
+	return `\n⚠️入力できなかった項目(${warnings.length}件):\n${lines.join('\n')}`;
+}
+
+
+//
 // LINE WORKS へ通知(未設定ならスキップ / 送信失敗しても処理は止めない)
 //
 async function notify(text) {
@@ -122,10 +153,11 @@ async function runBatch() {
 			const result = await handleFile(filePath); // 1件ずつ順番に処理(handleFile内で処理済みへ移動)
 			if (result && result.status === 'skip') {
 				skipList.push({ name, reason: result.reason });
-				await notify(`⚠️【自動登録】スキップ${result.stockNo ? ' ストックNo ' + result.stockNo : ''}\n${name}\n理由: ${result.reason}`);
+				await notify(`⚠️【自動登録】スキップ${result.stockNo ? ' ストックNo ' + result.stockNo : ' (ストックNoなし)'}\nしおりNo: ${result.shioriNo || '不明'}\n${name}\n理由: ${result.reason}`);
 			} else {
 				okList.push(name);
-				await notify(`✅【自動登録】正常完了 ストックNo ${result.stockNo} (${result.categoryLabel})\n${name}`);
+				console.log(`正常完了: しおりNo ${result.shioriNo || '不明'} / ストックNo ${result.stockNo}`);
+				await notify(`✅【自動登録】正常完了 ストックNo ${result.stockNo} (${result.categoryLabel})\nしおりNo: ${result.shioriNo || '不明'}\n${name}${warningsText(result.warnings)}`);
 			}
 		} catch (err) {
 			console.error(`処理失敗: ${filePath}`, err);
@@ -138,7 +170,13 @@ async function runBatch() {
 				console.error(`error フォルダへの移動に失敗: ${filePath}`, moveErr.message);
 			}
 			const errSummary = String(err.message).split('\n')[0].slice(0, 200); // 長いスタックは1行目だけ
-			await notify(`❌【自動登録】異常終了${err.stockNo ? ' ストックNo ' + err.stockNo : ' (ストックNo不明)'}\n${name}\nエラー: ${errSummary}`);
+			const lines = [`❌【自動登録】異常終了${err.stockNo ? ' ストックNo ' + err.stockNo : ' (ストックNo不明)'}`];
+			lines.push(`しおりNo: ${err.shioriNo || '不明'}`);
+			lines.push(name);
+			lines.push(`エラー発生工程: ${err.step || '不明'}`);
+			if (err.field) lines.push(`エラー箇所(直近のしおり項目): ${err.field}`);
+			lines.push(`エラー: ${errSummary}`);
+			await notify(lines.join('\n') + warningsText(err.warnings));
 		}
 	}
 	console.log('バッチ処理完了');
@@ -280,13 +318,19 @@ const FILL_HANDLERS = {
 // 処理
 //
 async function handleFile(filePath) {
+	resetCtx();
+	ctx.step = 'JSON読み込み';
 	const data = await fs.readJson(filePath);
 	//console.log('読み込んだデータ:', data);
 
+	// しおりNo (S12813 など。ストックNoが無い場合の特定用)
+	ctx.shioriNo = String((data.payload && data.payload.shioriNo) || data.shioriNo || '');
+	const shioriNo = ctx.shioriNo;
+
 	// ステータス確認 (payload自体が無い不正JSONもここで弾く)
 	if (!data.payload || data.payload.shioriStatus != "完了") {
-		console.log(`ステータス異常: ${filePath}`);
-		return { status: 'skip', reason: 'ステータスが「完了」ではない' };
+		console.log(`ステータス異常: しおりNo ${shioriNo || '不明'} ${filePath}`);
+		return { status: 'skip', reason: 'ステータスが「完了」ではない', shioriNo };
 	}
 
 	// テンプレート名から処理系統を判定
@@ -298,10 +342,11 @@ async function handleFile(filePath) {
 	const browser = await chromium.launch({ headless: false, slowMo: 100 });
 	const page = await browser.newPage();
 
-	console.log(`処理開始: ${filePath}`);
+	console.log(`処理開始: しおりNo ${shioriNo || '不明'} ${filePath}`);
 
 	try {
 		// ログイン
+		ctx.step = 'ログイン';
 		await page.goto(config.site.base_url + "/login");
 		await safeFill(page,"input[name=name]" , config.login.id);
 		await safeFill(page,"input[name=pass]" , config.login.password);
@@ -310,25 +355,31 @@ async function handleFile(filePath) {
 		//await page.waitForTimeout(1000);
 
 		// サイト（書類）編集画面
+		ctx.step = 'ストックNo確認';
 		var result = getShioriValue(data, 'ストックNo.');
 		if (!result) { // 項目が無い(null)場合と未入力("")の両方をスキップ
-			console.log(`ストックNO無し: ${filePath}`);
-			return { status: 'skip', reason: 'ストックNo.なし' };
+			console.log(`ストックNO無し: しおりNo ${shioriNo || '不明'} ${filePath}`);
+			return { status: 'skip', reason: 'ストックNo.なし', shioriNo };
 		}
 		const stock_no = String(result).split("-")[1];
 		if (!stock_no) { // 「1-90149」形式でない場合もスキップ
-			console.log(`ストックNO形式不正: [${result}] ${filePath}`);
-			return { status: 'skip', reason: `ストックNo.形式不正 (${result})` };
+			console.log(`ストックNO形式不正: [${result}] しおりNo ${shioriNo || '不明'} ${filePath}`);
+			return { status: 'skip', reason: `ストックNo.形式不正 (${result})`, shioriNo };
 		}
 		stockNoFull = String(result);
+		ctx.step = '車両編集画面を開く';
 		await page.goto(config.site.base_url + "/stock_regist/detail/" + stock_no);
 		await page.waitForTimeout(1000);
 
 		// 系統ごとの入力処理(未実装の系統からは false が返る)
+		ctx.step = `フォーム入力(${categoryLabel})`;
 		const filled = await FILL_HANDLERS[category](page, data);
 		if (!filled) {
 			console.log(`${categoryLabel}は未実装のためスキップ: ${filePath}`);
-			return { status: 'skip', reason: `${categoryLabel}は未実装`, stockNo: stockNoFull };
+			return { status: 'skip', reason: `${categoryLabel}は未実装`, stockNo: stockNoFull, shioriNo };
+		}
+		if (ctx.warnings.length > 0) {
+			console.log(`入力できなかった項目 ${ctx.warnings.length}件: ${ctx.warnings.join(' / ')}`);
 		}
 
 		// 登録ボタンを押す「前」にダイアログの処理を仕込む
@@ -338,6 +389,7 @@ async function handleFile(filePath) {
 		});
 		
 		// 保存（更新）
+		ctx.step = '保存(登録ボタン)';
 		await page.click('#submit_button');
 		// 登録完了待ち(直後に browser.close() すると保存リクエストが中断される恐れがあるため必須)
 		await page.waitForTimeout(3000);
@@ -346,6 +398,10 @@ async function handleFile(filePath) {
 
 	} catch (err) {
 		err.stockNo = stockNoFull; // 通知でどのストックNoで失敗したか分かるように
+		err.shioriNo = shioriNo;
+		err.step = ctx.step; // どの工程で失敗したか
+		err.field = ctx.step.startsWith('フォーム入力') ? ctx.lastName : ''; // 入力中なら直近のしおり項目
+		err.warnings = ctx.warnings.slice();
 		throw err;
 	} finally {
 		await browser.close();
@@ -356,7 +412,7 @@ async function handleFile(filePath) {
 	const destPath = path.join(PROCESSED_DIR, path.basename(filePath));
 	await fs.move(filePath, destPath, { overwrite: true });
 
-	return { status: 'ok', stockNo: stockNoFull, categoryLabel: categoryLabel };
+	return { status: 'ok', stockNo: stockNoFull, categoryLabel: categoryLabel, shioriNo, warnings: ctx.warnings.slice() };
 }
 
 // トラクター
@@ -929,6 +985,7 @@ async function safeFill(page, selector, value) {
 		await page.fill(selector, String(value), { timeout: 2000 });
 	} catch (e) {
 		console.log(`入力できずスキップ: ${selector} = ${value}`);
+		addWarning(selector, value);
 	}
 }
 
@@ -944,6 +1001,7 @@ async function safeSelectByValue(page, selector, value) {
 		await page.selectOption(selector, { value: String(value) }, { timeout: 2000 });
 	} catch (e) {
 		console.log(`選択できずスキップ: ${selector} = ${value}`);
+		addWarning(selector, value);
 	}
 }
 
@@ -961,12 +1019,14 @@ async function safeSelectByLabel(page, selector, label, fallbackLabel) {
 	} catch (e) {
 		if (!fallbackLabel) {
 			console.log(`選択できずスキップ: ${selector} = ${label}`);
+			addWarning(selector, label);
 			return;
 		}
 		try {
 			await page.selectOption(selector, { label: fallbackLabel }, { timeout: 2000 });
 		} catch (e2) {
 			console.log(`選択できずスキップ: ${selector} = ${label} / ${fallbackLabel}`);
+			addWarning(selector, label);
 		}
 	}
 }
@@ -976,12 +1036,13 @@ async function safeSelectByLabel(page, selector, label, fallbackLabel) {
  * 項目名の表記ゆれを吸収するための正規化
  * テンプレートによって同じ項目でも区切りが違う
  * (例: 箱系「基本情報ｰ走行距離」/ クレーン「基本情報　走行距離」)
- * → スペース類とハイフン類・アンダースコアを除去して比較する
+ * → スペース類とハイフン類・アンダースコア・ピリオド類を除去して比較する
  */
 function normalizeShioriName(name) {
 	return String(name)
 		.replace(/[\s　]/g, '')        // 半角/全角スペース
-		.replace(/[-ｰ－‐_]/g, '');    // ハイフン・長音・アンダースコア類
+		.replace(/[-ｰ－‐_]/g, '')      // ハイフン・長音・アンダースコア類
+		.replace(/[.．。｡]/g, '');     // ピリオド類(例: 「ストックNo.」と「ストックNo．」)
 }
 
 /**
@@ -993,6 +1054,7 @@ function normalizeShioriName(name) {
  * const isWing = getShioriValue(data, '形状ｰウイング');   // → false
  */
 function getShioriValue(data, name) {
+	ctx.lastName = name; // エラー通知用に直近に読んだ項目名を覚えておく
 	const extract = (field) => {
 		const v = field.values || {};
 		if (field.type === 'checkbox') return v.value === true;

@@ -3,3 +3,8 @@
 
 # 秘密鍵
 private_key.pem
+
+# logs
+logs
+processed
+input
