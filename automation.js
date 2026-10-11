@@ -337,6 +337,15 @@ async function handleFile(filePath) {
 	const { category, categoryLabel, templateName } = classifyTemplate(data);
 	console.log(`テンプレート: ${categoryLabel} [${templateName.trim() || '名称なし'}]`);
 
+	// 「トラック状態シート」は入力対象外。処理せず error フォルダへ移動してスキップ
+	if (templateName.includes('トラック状態シート')) {
+		console.log(`トラック状態シートのためスキップ: しおりNo ${shioriNo || '不明'} ${filePath}`);
+		await fs.ensureDir(ERROR_DIR);
+		await fs.move(filePath, path.join(ERROR_DIR, path.basename(filePath)), { overwrite: true });
+		const stockNo = getShioriValue(data, 'ストックNo.');
+		return { status: 'skip', reason: 'トラック状態シートは対象外(errorフォルダへ移動)', stockNo: stockNo || undefined, shioriNo };
+	}
+
 	let stockNoFull = null; // 通知用のストックNo(取得できた時点でセットされる)
 
 	const browser = await chromium.launch({ headless: false, slowMo: 100 });
@@ -911,11 +920,12 @@ async function fillBoxVehicle(page, data) {
 	// ⑪ホイール
 	// 3項目とも JSON に存在しない(null)場合は触らず、画面の選択を維持する
 	// 項目が存在してチェック無しなら「無」を選択する
+	// 鉄・スチールメッキはアルミ(アロイ)ホイールではないので、アルミだけが「有」
 	const isWheel_fe = getShioriValue(data, '駆動他　ホイール-鉄');
 	const isWheel_chrome = getShioriValue(data, '駆動他　ホイール-スチールメッキ');
 	const isWheel_aluminum = getShioriValue(data, '駆動他　ホイール-アルミ');
 	if (isWheel_fe !== null || isWheel_chrome !== null || isWheel_aluminum !== null) {
-		if (isWheel_fe || isWheel_chrome || isWheel_aluminum) {
+		if (isWheel_aluminum) {
 			await safeSelectByLabel(page, 'select[name="t_vehicle__alloy_wheels_cls_id"]', '有');
 		} else {
 			await safeSelectByLabel(page, 'select[name="t_vehicle__alloy_wheels_cls_id"]', '無');
@@ -967,7 +977,34 @@ async function fillBoxVehicle(page, data) {
 		console.log(`クレーン製造年月(年)を西暦として変換できずスキップ: ${crane_manufacturing_year}`);
 	}
 	await safeFill(page, 'input[name="t_vehicle__crane_manufacturing_month"]', crane_manufacturing_month);
+	
+	// 基本情報-ターボ-
+	var t_vehicle__tarbo_cls_id = 0;
+	const t_vehicle__tarbo_cls_id_ari = getShioriValue(data, '基本情報-ターボ-有');
+	const t_vehicle__tarbo_cls_id_nai = getShioriValue(data, '基本情報-ターボ-無');
+	if (t_vehicle__tarbo_cls_id_ari) t_vehicle__tarbo_cls_id = 1; // 有
+	if (t_vehicle__tarbo_cls_id_nai) t_vehicle__tarbo_cls_id = 2; // 無
+	await safeSelectByValue(page, 'select[name="t_vehicle__tarbo_cls_id"]', t_vehicle__tarbo_cls_id);
+	
+	// 駆動他　坂道発進補助装置
+	var t_vehicle__hill_holder_device_cls_id = 0;
+	const t_vehicle__hill_holder_device_cls_id_ari = getShioriValue(data, '駆動他　坂道発進補助装置-有');
+	const t_vehicle__hill_holder_device_cls_id_nai = getShioriValue(data, '駆動他　坂道発進補助装置-無');
+	if (t_vehicle__hill_holder_device_cls_id_ari) t_vehicle__hill_holder_device_cls_id = 1; // 有
+	if (t_vehicle__hill_holder_device_cls_id_nai) t_vehicle__hill_holder_device_cls_id = 2; // 無
+	await safeSelectByValue(page, 'select[name="t_vehicle__hill_holder_device_cls_id"]', t_vehicle__hill_holder_device_cls_id);
+	
+	// 横扉　幅
+	const t_vehicle__side_door_width = toHalfWidthNumber(getShioriValue(data, '横扉　幅'));
+	await safeFill(page,'input[name="t_vehicle__side_door_width"]' , t_vehicle__side_door_width);
 
+	// 横扉　高さ
+	const t_vehicle__side_door_height = toHalfWidthNumber(getShioriValue(data, '横扉　高さ'));
+	await safeFill(page,'input[name="t_vehicle__side_door_height"]' , t_vehicle__side_door_height);
+	
+	
+	
+	
 	return true;
 }
 
@@ -1083,9 +1120,11 @@ function getShioriValue(data, name) {
 
 /**
  * 文字列から数字だけを取り出す（全角数字は半角に変換）
+ * 小数点以下は切り捨てる（"967.0" を "9670" にしないため）
  * 例: "３t"     → "3"
  *     "１,２００kg" → "1200"
  *     "約 50 km" → "50"
+ *     "967.0"   → "967"
  * @param {*} value 変換元（数値・null等が来ても落ちない）
  * @returns {string} 数字のみの文字列（該当なしは ''）
  */
@@ -1093,6 +1132,7 @@ function toHalfWidthNumber(value) {
 	if (value == null) return '';
 	return String(value)
 		.replace(/[０-９]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xFEE0)) // 全角数字→半角
+		.replace(/[.．].*$/, '') // 小数点以下を切り捨て（「.」以降すべて）
 		.replace(/[^0-9]/g, ''); // 数字以外を除去
 }
 
