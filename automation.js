@@ -865,20 +865,21 @@ async function fillBoxVehicle(page, data) {
 	await safeSelectByValue(page, 'select[name="t_vehicle__freezing_machine_standby_cls_id"]', t_vehicle__freezing_machine_standby_cls_id);
 
 	// ⑨冷凍機　温度設定-下限①　強制的にマイナスにする
-	const t_vehicle__freezing_preset_temperature = toHalfWidthNumber(getShioriValue(data, '冷凍機　温度設定-下限'));
+	// (しおりに「-25」「25」どちらで書かれていても絶対値を取ってマイナスにする)
+	const t_vehicle__freezing_preset_temperature = toSignedNumber(getShioriValue(data, '冷凍機　温度設定-下限')).replace('-', '');
 	// 空のときに「* -1」で "0" になって入力されないよう、値がある場合だけ符号を付ける
 	await safeFill(page,'input[name="t_vehicle__freezing_preset_temperature"]' , t_vehicle__freezing_preset_temperature === '' ? '' : String(-Number(t_vehicle__freezing_preset_temperature)));
 
-	// ⑨冷凍機　温度計測-自②
-	const t_vehicle__freezing_before_operate_temperature = toHalfWidthNumber(getShioriValue(data, '冷凍機　温度計測-自'));
+	// ⑨冷凍機　温度計測-自② (マイナスがあり得るので符号を残す)
+	const t_vehicle__freezing_before_operate_temperature = toSignedNumber(getShioriValue(data, '冷凍機　温度計測-自'));
 	await safeFill(page,'input[name="t_vehicle__freezing_before_operate_temperature"]' , t_vehicle__freezing_before_operate_temperature);
 
 	// ⑨冷凍機　温度計測-時間③
 	const t_vehicle__freezing_measurement_time = toHalfWidthNumber(getShioriValue(data, '冷凍機　温度計測-時間'));
 	await safeFill(page,'input[name="t_vehicle__freezing_measurement_time"]' , t_vehicle__freezing_measurement_time);
 
-	// ⑨冷凍機　温度計測-至④
-	const t_vehicle__freezing_measurement_temprature = toHalfWidthNumber(getShioriValue(data, '冷凍機　温度計測-至'));
+	// ⑨冷凍機　温度計測-至④ (マイナスがあり得るので符号を残す)
+	const t_vehicle__freezing_measurement_temprature = toSignedNumber(getShioriValue(data, '冷凍機　温度計測-至'));
 	await safeFill(page,'input[name="t_vehicle__freezing_measurement_temprature"]' , t_vehicle__freezing_measurement_temprature);
 
 	// ⑩クレーン-クレーンメーカー
@@ -1294,21 +1295,75 @@ function getShioriValue(data, name) {
 
 
 /**
+ * しおりの数値文字列を解析する(toHalfWidthNumber / toSignedNumber の共通処理)
+ * - 全角数字・全角ピリオドは半角に変換
+ * - 数字の直前のマイナス類(- − － ‐ ― ｰ)を符号として扱う(「メートル」の「ー」などは対象外)
+ * - 小数点以下は捨てるが、0以外の小数("8.5")や「万」("45万km")は値が変わってしまうので problem に理由を入れる
+ * @returns {{ negative: boolean, digits: string, problem: string }}
+ */
+function parseShioriNumber(value) {
+	if (value == null) return { negative: false, digits: '', problem: '' };
+	const s = String(value)
+		.replace(/[０-９]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xFEE0)) // 全角数字→半角
+		.replace(/．/g, '.')
+		.replace(/[−－‐―ｰ](?=\s*[0-9])/g, '-'); // 数字の前のマイナス類 → 半角マイナス
+
+	const firstDigit = s.search(/[0-9]/);
+	if (firstDigit < 0) return { negative: false, digits: '', problem: '' };
+
+	const negative = /-\s*$/.test(s.slice(0, firstDigit));
+	const digits = s.replace(/\..*$/, '').replace(/[^0-9]/g, ''); // 小数点以下を除き、数字以外を除去
+	const frac = (s.match(/[0-9]\.([0-9]+)/) || [])[1] || '';
+
+	let problem = '';
+	if (/[万萬]/.test(s)) problem = '「万」を含む';
+	else if (/[1-9]/.test(frac)) problem = '小数を含む';
+	return { negative, digits, problem };
+}
+
+// 数値に変換できなかった値を、入力できなかった項目として記録する(通知に載る)
+function addNumberWarning(value, reason) {
+	const field = ctx.lastName ? `「${ctx.lastName}」` : '';
+	const text = `${field} = ${String(value).slice(0, 30)} (${reason}ため入力せず)`; // reason 例: 「小数を含む」
+	console.log(`数値に変換できずスキップ: ${text}`);
+	if (!ctx.warnings.includes(text)) ctx.warnings.push(text);
+}
+
+/**
  * 文字列から数字だけを取り出す（全角数字は半角に変換）
- * 小数点以下は切り捨てる（"967.0" を "9670" にしないため）
+ * 小数点以下の「.0」は切り捨てる（"967.0" を "9670" にしないため）
+ * 値が変わってしまうもの(0以外の小数・「万」・マイナス値)は入力せず '' を返し、warnings に記録する
  * 例: "３t"     → "3"
  *     "１,２００kg" → "1200"
  *     "約 50 km" → "50"
  *     "967.0"   → "967"
+ *     "8.5" / "45万km" / "-18" → ''（警告）
  * @param {*} value 変換元（数値・null等が来ても落ちない）
  * @returns {string} 数字のみの文字列（該当なしは ''）
  */
 function toHalfWidthNumber(value) {
-	if (value == null) return '';
-	return String(value)
-		.replace(/[０-９]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xFEE0)) // 全角数字→半角
-		.replace(/[.．].*$/, '') // 小数点以下を切り捨て（「.」以降すべて）
-		.replace(/[^0-9]/g, ''); // 数字以外を除去
+	const n = parseShioriNumber(value);
+	if (!n.digits) return '';
+	const problem = n.problem || (n.negative ? 'マイナス値の' : '');
+	if (problem) {
+		addNumberWarning(value, problem);
+		return '';
+	}
+	return n.digits;
+}
+
+/**
+ * toHalfWidthNumber の符号付き版(温度など、マイナスがあり得る項目用)
+ * 例: "-18℃" → "-18" / "−５" → "-5" / "25" → "25" / "-18.5" → ''（警告）
+ */
+function toSignedNumber(value) {
+	const n = parseShioriNumber(value);
+	if (!n.digits) return '';
+	if (n.problem) {
+		addNumberWarning(value, n.problem);
+		return '';
+	}
+	return (n.negative && Number(n.digits) !== 0 ? '-' : '') + n.digits;
 }
 
 
