@@ -8,3 +8,12 @@ private_key.pem
 logs
 processed
 input
+
+# エラー移動先(顧客の車両データを含む)
+error
+
+# Playwrightのブラウザプロファイル(セッション情報を含む)
+chrome-profile
+
+# 依存パッケージ
+node_modules

@@ -153,6 +153,13 @@ async function runBatch() {
 			const result = await handleFile(filePath); // 1件ずつ順番に処理(handleFile内で処理済みへ移動)
 			if (result && result.status === 'skip') {
 				skipList.push({ name, reason: result.reason });
+				// スキップしたファイルも error フォルダへ移動(input に残すと毎回再処理・再通知されるため)
+				try {
+					await fs.ensureDir(ERROR_DIR);
+					await fs.move(filePath, path.join(ERROR_DIR, name), { overwrite: true });
+				} catch (moveErr) {
+					console.error(`error フォルダへの移動に失敗: ${filePath}`, moveErr.message);
+				}
 				await notify(`⚠️【自動登録】スキップ${result.stockNo ? ' ストックNo ' + result.stockNo : ' (ストックNoなし)'}\nしおりNo: ${result.shioriNo || '不明'}\n${name}\n理由: ${result.reason}`);
 			} else {
 				okList.push(name);
@@ -310,7 +317,7 @@ const FILL_HANDLERS = {
 	tractor:    fillTractor, // トラクター
 	packer:     fillPacker, // パッカー
 	mixer:      fillMixer, // ミキサー
-	unknown:    fillBoxVehicle, // その他(未分類)
+	// 未分類(unknown)は handleFile で入力せずスキップするので対応表には持たない
 };
 
 
@@ -337,16 +344,42 @@ async function handleFile(filePath) {
 	const { category, categoryLabel, templateName } = classifyTemplate(data);
 	console.log(`テンプレート: ${categoryLabel} [${templateName.trim() || '名称なし'}]`);
 
-	// 「トラック状態シート」は入力対象外。処理せず error フォルダへ移動してスキップ
+	// スキップ(status: 'skip')は呼び出し元の runBatch が error フォルダへ移動する
+
+	// 「トラック状態シート」は入力対象外
 	if (templateName.includes('トラック状態シート')) {
 		console.log(`トラック状態シートのためスキップ: しおりNo ${shioriNo || '不明'} ${filePath}`);
-		await fs.ensureDir(ERROR_DIR);
-		await fs.move(filePath, path.join(ERROR_DIR, path.basename(filePath)), { overwrite: true });
 		const stockNo = getShioriValue(data, 'ストックNo.');
 		return { status: 'skip', reason: 'トラック状態シートは対象外(errorフォルダへ移動)', stockNo: stockNo || undefined, shioriNo };
 	}
 
-	let stockNoFull = null; // 通知用のストックNo(取得できた時点でセットされる)
+	// どの系統にも当てはまらないテンプレートは入力せずスキップ(何も入力されないまま「正常完了」になるのを防ぐ)
+	if (category === 'unknown') {
+		console.log(`未分類のテンプレートのためスキップ: [${templateName.trim() || '名称なし'}] しおりNo ${shioriNo || '不明'} ${filePath}`);
+		const stockNo = getShioriValue(data, 'ストックNo.');
+		return { status: 'skip', reason: `テンプレートが未分類 [${templateName.trim() || '名称なし'}] (errorフォルダへ移動)`, stockNo: stockNo || undefined, shioriNo };
+	}
+
+	// ストックNoの確認(ブラウザ起動・ログインの前に行い、不要なログインをしない)
+	ctx.step = 'ストックNo確認';
+	const result = getShioriValue(data, 'ストックNo.');
+	if (!result) { // 項目が無い(null)場合と未入力("")の両方
+		console.log(`ストックNO無し: しおりNo ${shioriNo || '不明'} ${filePath}`);
+		// エラー扱い: runBatch が異常終了通知を出して error フォルダへ移動する
+		const e = new Error('ストックNo.が未入力です');
+		e.shioriNo = shioriNo;
+		e.step = ctx.step;
+		e.warnings = [];
+		throw e;
+	}
+	// 「1-90149」形式。頭の数字とハイフンを省いた「90149」だけの入力も許容する
+	const stockParts = String(result).trim().split("-");
+	const stock_no = stockParts.length > 1 ? stockParts[1] : stockParts[0];
+	if (!stock_no) { // 「1-」のように番号部分が空の場合はスキップ
+		console.log(`ストックNO形式不正: [${result}] しおりNo ${shioriNo || '不明'} ${filePath}`);
+		return { status: 'skip', reason: `ストックNo.形式不正 (${result})`, shioriNo };
+	}
+	const stockNoFull = String(result); // 通知用のストックNo
 
 	const browser = await chromium.launch({ headless: false, slowMo: 100 });
 	const page = await browser.newPage();
@@ -364,18 +397,6 @@ async function handleFile(filePath) {
 		//await page.waitForTimeout(1000);
 
 		// サイト（書類）編集画面
-		ctx.step = 'ストックNo確認';
-		var result = getShioriValue(data, 'ストックNo.');
-		if (!result) { // 項目が無い(null)場合と未入力("")の両方をスキップ
-			console.log(`ストックNO無し: しおりNo ${shioriNo || '不明'} ${filePath}`);
-			return { status: 'skip', reason: 'ストックNo.なし', shioriNo };
-		}
-		const stock_no = String(result).split("-")[1];
-		if (!stock_no) { // 「1-90149」形式でない場合もスキップ
-			console.log(`ストックNO形式不正: [${result}] しおりNo ${shioriNo || '不明'} ${filePath}`);
-			return { status: 'skip', reason: `ストックNo.形式不正 (${result})`, shioriNo };
-		}
-		stockNoFull = String(result);
 		ctx.step = '車両編集画面を開く';
 		await page.goto(config.site.base_url + "/stock_regist/detail/" + stock_no);
 		await page.waitForTimeout(1000);
@@ -399,9 +420,24 @@ async function handleFile(filePath) {
 		
 		// 保存（更新）
 		ctx.step = '保存(登録ボタン)';
+		// 保存リクエスト(POST)の応答を待つ。クリック前に待ち受けを仕込む
+		// (直後に browser.close() すると保存リクエストが中断される恐れがあるため、応答が返るまで閉じない)
+		const saveResponse = page.waitForResponse((res) => res.request().method() === 'POST', { timeout: 30000 });
+		saveResponse.catch(() => {}); // クリック側で先に失敗した場合の未処理エラー防止
 		await page.click('#submit_button');
-		// 登録完了待ち(直後に browser.close() すると保存リクエストが中断される恐れがあるため必須)
-		await page.waitForTimeout(3000);
+		let res;
+		try {
+			res = await saveResponse;
+		} catch (e) {
+			throw new Error('保存の完了を確認できませんでした(30秒以内に保存リクエストの応答なし)');
+		}
+		if (res.status() >= 400) {
+			throw new Error(`保存に失敗しました: HTTP ${res.status()} ${res.url()}`);
+		}
+		// 保存後の画面遷移・通信が落ち着くまで待つ(失敗しても保存自体は応答済みなので続行)
+		await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {
+			console.log('保存後の通信完了待ちがタイムアウトしました(保存の応答は確認済み)');
+		});
 
 		console.log(`処理完了: ${filePath}`);
 
@@ -428,7 +464,7 @@ async function handleFile(filePath) {
 async function fillTractor(page, data) {
 	await fillBoxVehicle(page, data);
 
-	const t_vehicle__body_manufacturer_id = getShioriValue(data, 'ヘッド-カプラーメーカー');
+	const t_vehicle__body_manufacturer_id = mapBodyMaker(getShioriValue(data, 'ヘッド-カプラーメーカー'));
 	await safeSelectByLabel(page, 'select[name="t_vehicle__body_manufacturer_id"]', t_vehicle__body_manufacturer_id, 'その他');
 
 	// ヘッド-カプラ型式 (画面はボディ型式と同じ欄。要確認)
@@ -443,7 +479,7 @@ async function fillTractor(page, data) {
 async function fillDump(page, data) {
 	await fillBoxVehicle(page, data);
 	
-	const t_vehicle__body_manufacturer_id = getShioriValue(data, 'ダンプ-ボディーメーカー');
+	const t_vehicle__body_manufacturer_id = mapBodyMaker(getShioriValue(data, 'ダンプ-ボディーメーカー'));
 	await safeSelectByLabel(page, 'select[name="t_vehicle__body_manufacturer_id"]', t_vehicle__body_manufacturer_id, 'その他');
 	
 	const t_vehicle__body_model = getShioriValue(data, 'ダンプ-ボディー型式');
@@ -481,7 +517,7 @@ async function fillDump(page, data) {
 async function fillArm(page, data) {
 	await fillBoxVehicle(page, data);
 	
-	const t_vehicle__body_manufacturer_id = getShioriValue(data, 'アームロール-ボディーメーカー');
+	const t_vehicle__body_manufacturer_id = mapBodyMaker(getShioriValue(data, 'アームロール-ボディーメーカー'));
 	await safeSelectByLabel(page, 'select[name="t_vehicle__body_manufacturer_id"]', t_vehicle__body_manufacturer_id, 'その他');
 	
 	const t_vehicle__body_model = getShioriValue(data, 'アームロール-ボディ型式');
@@ -502,7 +538,7 @@ async function fillArm(page, data) {
 async function fillPacker(page, data) {
 	await fillBoxVehicle(page, data);
 	
-	const t_vehicle__body_manufacturer_id = getShioriValue(data, 'パッカー　ボディメーカー');
+	const t_vehicle__body_manufacturer_id = mapPackerMaker(getShioriValue(data, 'パッカー　ボディメーカー'));
 	await safeSelectByLabel(page, 'select[name="t_vehicle__body_manufacturer_id"]', t_vehicle__body_manufacturer_id, 'その他');
 	
 	const t_vehicle__body_model = getShioriValue(data, 'パッカー　ボディ型式');
@@ -532,7 +568,7 @@ async function fillPacker(page, data) {
 async function fillMixer(page, data) {
 	await fillBoxVehicle(page, data);
 	
-	const t_vehicle__body_manufacturer_id = getShioriValue(data, 'ラベルミキサー-ボティーメーカー');
+	const t_vehicle__body_manufacturer_id = mapBodyMaker(getShioriValue(data, 'ラベルミキサー-ボティーメーカー'));
 	await safeSelectByLabel(page, 'select[name="t_vehicle__body_manufacturer_id"]', t_vehicle__body_manufacturer_id, 'その他');
 	
 	const t_vehicle__body_model = getShioriValue(data, 'ミキサー-ボディー型式');
@@ -625,23 +661,21 @@ async function fillBoxVehicle(page, data) {
 	// セミAT
 	if (isTransmission_semiAT) {
 
-		const t_vehicle__manufacturer_id = await page.locator(
+		// 画面の車両メーカー(選択中の表示文字。前後の空白・改行は除く)
+		const t_vehicle__manufacturer_id = ((await page.locator(
 		'select[name="t_vehicle__manufacturer_id"] option:checked'
-		).textContent();
+		).textContent()) || '').trim();
 		const clutch_pedal_count = toHalfWidthNumber(getShioriValue(data, 'ミッション-クラッチペダル数'));
 
+		// メーカー名の表記ゆれ(いすず/いすゞ、UD など)を吸収して、セミATの呼び名を決める
 		var selected = "";
-		if (t_vehicle__manufacturer_id == "いすず" ) {
-			selected = "スムーサー(" + clutch_pedal_count + "ペダル)";
-		}
-		if (t_vehicle__manufacturer_id == "日野" ) {
-			selected = "プロシフト(" + clutch_pedal_count + "ペダル)";
-		}
-		if (t_vehicle__manufacturer_id == "三菱ふそう" ) {
-			selected = "イノマット(" + clutch_pedal_count + "ペダル)";
-		}
-		if (t_vehicle__manufacturer_id == "日産UD" ) {
-			selected = "エスコット(" + clutch_pedal_count + "ペダル)";
+		const semiAtName = semiAtNameOf(t_vehicle__manufacturer_id);
+		if (!semiAtName) {
+			addShiftWarning(`セミAT: メーカー「${t_vehicle__manufacturer_id || '未選択'}」に対応するシフトがありません`);
+		} else if (!clutch_pedal_count) {
+			addShiftWarning(`セミAT: クラッチペダル数が未入力のため「${semiAtName}」を選べません`);
+		} else {
+			selected = semiAtName + "(" + clutch_pedal_count + "ペダル)";
 		}
 		await safeSelectByLabel(page, 'select[name="t_vehicle__shift_cls_id"]', selected);
 	}
@@ -659,7 +693,7 @@ async function fillBoxVehicle(page, data) {
 	await safeSelectByValue(page, 'select[name="t_vehicle__suspension_cls_id"]', t_vehicle__suspension_cls_id);
 
 	// ⑥ボディーメーカー (未選択なら触らない。選択肢に無いラベルは「その他」)
-	const t_vehicle__body_manufacturer_id = getShioriValue(data, 'ボディ　ボディーメーカー');
+	const t_vehicle__body_manufacturer_id = mapBodyMaker(getShioriValue(data, 'ボディ　ボディーメーカー'));
 	await safeSelectByLabel(page, 'select[name="t_vehicle__body_manufacturer_id"]', t_vehicle__body_manufacturer_id, 'その他');
 
 	// ⑥ボディ型式
@@ -754,7 +788,7 @@ async function fillBoxVehicle(page, data) {
 
 
 	// ⑧メーカー (未選択なら触らない。選択肢に無いラベルは「その他」)
-	const t_vehicle__gate_manufacturer_id = getShioriValue(data, 'パワーゲート　メーカー');
+	const t_vehicle__gate_manufacturer_id = mapGateMaker(getShioriValue(data, 'パワーゲート　メーカー'));
 	await safeSelectByLabel(page, 'select[name="t_vehicle__gate_manufacturer_id"]', t_vehicle__gate_manufacturer_id, 'その他');
 
 	// ⑧メーカー　ゲートタイプ TODO
@@ -806,7 +840,7 @@ async function fillBoxVehicle(page, data) {
 	await safeFill(page,'input[name="t_vehicle__width_to_stopper"]' , t_vehicle__width_to_stopper);
 
 	// ⑨冷凍機メーカー (未選択なら触らない。選択肢に無いラベルは「その他」)
-	const t_vehicle__freezing_machine_manufacturer_id = getShioriValue(data, '冷凍機　冷凍機メーカー');
+	const t_vehicle__freezing_machine_manufacturer_id = mapFreezerMaker(getShioriValue(data, '冷凍機　冷凍機メーカー'));
 	await safeSelectByLabel(page, 'select[name="t_vehicle__freezing_machine_manufacturer_id"]', t_vehicle__freezing_machine_manufacturer_id, 'その他');
 
 	// ⑨冷凍機　冷凍機型式
@@ -830,9 +864,10 @@ async function fillBoxVehicle(page, data) {
 	}
 	await safeSelectByValue(page, 'select[name="t_vehicle__freezing_machine_standby_cls_id"]', t_vehicle__freezing_machine_standby_cls_id);
 
-	// ⑨冷凍機　温度設定-下限①
+	// ⑨冷凍機　温度設定-下限①　強制的にマイナスにする
 	const t_vehicle__freezing_preset_temperature = toHalfWidthNumber(getShioriValue(data, '冷凍機　温度設定-下限'));
-	await safeFill(page,'input[name="t_vehicle__freezing_preset_temperature"]' , t_vehicle__freezing_preset_temperature);
+	// 空のときに「* -1」で "0" になって入力されないよう、値がある場合だけ符号を付ける
+	await safeFill(page,'input[name="t_vehicle__freezing_preset_temperature"]' , t_vehicle__freezing_preset_temperature === '' ? '' : String(-Number(t_vehicle__freezing_preset_temperature)));
 
 	// ⑨冷凍機　温度計測-自②
 	const t_vehicle__freezing_before_operate_temperature = toHalfWidthNumber(getShioriValue(data, '冷凍機　温度計測-自'));
@@ -847,7 +882,7 @@ async function fillBoxVehicle(page, data) {
 	await safeFill(page,'input[name="t_vehicle__freezing_measurement_temprature"]' , t_vehicle__freezing_measurement_temprature);
 
 	// ⑩クレーン-クレーンメーカー
-	const t_vehicle__crane_manufacturer_id = getShioriValue(data, 'クレーン-クレーンメーカー');
+	const t_vehicle__crane_manufacturer_id = mapCraneMaker(getShioriValue(data, 'クレーン-クレーンメーカー'));
 	await safeSelectByLabel(page, 'select[name="t_vehicle__crane_manufacturer_id"]', t_vehicle__crane_manufacturer_id, 'その他');
 	
 	// ⑩クレーン-クレーン型式
@@ -1002,6 +1037,13 @@ async function fillBoxVehicle(page, data) {
 	const t_vehicle__side_door_height = toHalfWidthNumber(getShioriValue(data, '横扉　高さ'));
 	await safeFill(page,'input[name="t_vehicle__side_door_height"]' , t_vehicle__side_door_height);
 	
+	// 電装品　オーディオ
+	var t_vehicle__radio_cls_id = 0;
+	const t_vehicle__radio_cls_id_ari = getShioriValue(data, '電装品　オーディオ-有');
+	const t_vehicle__radio_cls_id_nai = getShioriValue(data, '電装品　オーディオ-無');
+	if (t_vehicle__radio_cls_id_ari) t_vehicle__radio_cls_id = 1; // 有
+	if (t_vehicle__radio_cls_id_nai) t_vehicle__radio_cls_id = 2; // 無
+	await safeSelectByValue(page, 'select[name="t_vehicle__radio_cls_id"]', t_vehicle__radio_cls_id);
 	
 	
 	
@@ -1028,6 +1070,30 @@ async function safeFill(page, selector, value) {
 
 
 /**
+ * セミATの呼び名: 車両メーカー → シフト名
+ * メーカーは画面の表示文字(表記ゆれあり)。対応が無ければ空文字
+ */
+const SEMI_AT_NAMES = [
+	{ makers: ['いすず', 'いすゞ', 'いすゞ自動車', 'いすず自動車', 'ISUZU'],       name: 'スムーサー' },
+	{ makers: ['日野', '日野自動車', 'HINO'],                                      name: 'プロシフト' },
+	{ makers: ['三菱ふそう', '三菱ふそうトラック・バス', '三菱FUSO', 'FUSO'],       name: 'イノマット' },
+	{ makers: ['日産UD', 'UDトラックス', 'UD', 'いすゞUD', 'いすずUD'],              name: 'エスコット' },
+];
+
+function semiAtNameOf(maker) {
+	const key = String(maker || '').replace(/[\s　]/g, '').toUpperCase();
+	const hit = SEMI_AT_NAMES.find((s) => s.makers.some((m) => m.toUpperCase() === key));
+	return hit ? hit.name : '';
+}
+
+// セミATでシフトを決められなかった理由を、入力できなかった項目として記録する(通知に載る)
+function addShiftWarning(text) {
+	console.log(text);
+	if (!ctx.warnings.includes(text)) ctx.warnings.push(text);
+}
+
+
+/**
  * プルダウンを value で選択するラッパー。
  * - 値が 0 や空(情報なし)なら画面に触らない(既存の選択を維持)
  * - 行が非表示などで選択できない場合もエラーにせず、ログを出して続行する
@@ -1042,6 +1108,115 @@ async function safeSelectByValue(page, selector, value) {
 	}
 }
 
+
+/**
+ * ボディーメーカー(ボディ・ダンプ・アームロール・ミキサー・ヘッド共通)の対応表
+ * 表に無いSHIORIの値はCANVASに対応が無いので「その他」(mapBodyMaker参照)
+ */
+const BODY_MAKER_MAP = {
+	'日本トレクス'			: 'トレクス',
+	'東プレ'				: '東プレ',
+	'フルハーフ'			: 'フルハーフ',
+	'トランテックス'		: 'トランテックス',
+	'パブコ'				: 'パブコ',
+	'新明和'				: '新明和',
+	'花見台自動車'			: '花見台',
+	'矢野特殊'				: '矢野特殊',
+	'極東開発工業'			: '極東',
+	'北村製作所'			: 'キタムラ',
+	'小平産業'				: 'コダイラ',
+	'山田車輛'				: '山田車体',
+	'美川ボデー'			: '美川ボデー',
+	'カヤバ工業'			: 'カヤバ',
+	'富士車両'				: '富士車輌',
+	'日野車体'				: '日野車体',
+	'ソーシン'				: 'ソーシン',
+};
+
+/**
+ * ボディーメーカー: SHIORIの値 → CANVASの選択肢ラベル
+ * CANVASに対応する値が無いものは「その他」。未選択は触らない。
+ * 表に無い値も「その他」
+ */
+function mapBodyMaker(shioriLabel) {
+	if (!shioriLabel) return shioriLabel;
+	const key = String(shioriLabel).trim();
+	return Object.prototype.hasOwnProperty.call(BODY_MAKER_MAP, key) ? BODY_MAKER_MAP[key] : 'その他';
+}
+
+/**
+ * パッカー用ボディメーカー: SHIORIの値 → CANVASの選択肢ラベル
+ * (パッカーはSHIORIの選択肢がボディと異なる。表に無い値はCANVASに対応が無いので「その他」)
+ */
+const PACKER_MAKER_MAP = {
+	'新明和'		: '新明和',
+	'極東'			: '極東',
+	'富士'			: '富士車輌',
+	'モリタエコノス': 'モリタエコノス',
+};
+
+function mapPackerMaker(shioriLabel) {
+	if (!shioriLabel) return shioriLabel;
+	const key = String(shioriLabel).trim();
+	return Object.prototype.hasOwnProperty.call(PACKER_MAKER_MAP, key) ? PACKER_MAKER_MAP[key] : 'その他';
+}
+
+/**
+ * パワーゲートメーカー: SHIORIの値 → CANVASの選択肢ラベル
+ * 表に無い値(トーヨー・東プレ等、CANVASに対応が無いもの)は「その他」
+ */
+const GATE_MAKER_MAP = {
+	'フルハーフ'		: 'フルハーフ',
+	'トランテックス'	: 'トランテックス',
+	'パブコ'			: 'パブコ',
+	'トレクス'			: 'トレクス',
+	'キタムラ'			: 'キタムラ',
+	'日野車体'			: '日野車体',
+	'コダイラ'			: 'コダイラ',
+	'新明和'			: '新明和',
+	'極東'				: '極東',
+	'日本リフト'		: '日本リフト',
+};
+
+function mapGateMaker(shioriLabel) {
+	if (!shioriLabel) return shioriLabel;
+	const key = String(shioriLabel).trim();
+	return Object.prototype.hasOwnProperty.call(GATE_MAKER_MAP, key) ? GATE_MAKER_MAP[key] : 'その他';
+}
+
+/**
+ * 冷凍機メーカー: SHIORIの値 → CANVASの選択肢ラベル
+ * 表に無い値(キャリアートランジコールド等、CANVASに対応が無いもの)は「その他」
+ */
+const FREEZER_MAKER_MAP = {
+	'東プレ'		: '東プレ',
+	'菱重'			: '菱重',
+	'サーモキング'	: 'サーモキング',
+	'デンソー'		: 'デンソー',
+};
+
+function mapFreezerMaker(shioriLabel) {
+	if (!shioriLabel) return shioriLabel;
+	const key = String(shioriLabel).trim();
+	return Object.prototype.hasOwnProperty.call(FREEZER_MAKER_MAP, key) ? FREEZER_MAKER_MAP[key] : 'その他';
+}
+
+/**
+ * クレーンメーカー: SHIORIの値 → CANVASの選択肢ラベル
+ * 表に無い値(新明和・前田製作所等、CANVASに対応が無いもの)は「その他」
+ */
+const CRANE_MAKER_MAP = {
+	'タダノ'		: 'タダノ',
+	'古河ユニック'	: '古河ユニック',
+	'ヒアブ'		: 'ヒアブ',
+	'加藤製作所'	: 'カトウ',
+};
+
+function mapCraneMaker(shioriLabel) {
+	if (!shioriLabel) return shioriLabel;
+	const key = String(shioriLabel).trim();
+	return Object.prototype.hasOwnProperty.call(CRANE_MAKER_MAP, key) ? CRANE_MAKER_MAP[key] : 'その他';
+}
 
 /**
  * プルダウンをラベル(表示文字)で選択するラッパー。
